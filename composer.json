@@ -1,0 +1,46 @@
+{
+    "name": "youvision/think-richtext",
+    "description": "ThinkPHP 8 富文本入库转义与读取还原组件，基于 HTMLPurifier 与 htmlspecialchars/addslashes 过滤可执行代码",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "thinkphp",
+        "richtext",
+        "xss",
+        "htmlspecialchars",
+        "addslashes",
+        "htmlpurifier",
+        "filter"
+    ],
+    "require": {
+        "php": ">=8.0",
+        "ext-dom": "*",
+        "ext-libxml": "*",
+        "ext-mbstring": "*",
+        "ezyang/htmlpurifier": "^4.17"
+    },
+    "autoload": {
+        "psr-4": {
+            "Youvision\\ThinkRichText\\": "src/"
+        },
+        "files": [
+            "src/helper.php"
+        ]
+    },
+    "extra": {
+        "think": {
+            "services": [
+                "Youvision\\ThinkRichText\\Service"
+            ],
+            "config": {
+                "richtext": "config/richtext.php"
+            }
+        }
+    },
+    "scripts": {
+        "test": "php tests/richtext_test.php"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
