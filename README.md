@@ -1,3 +1,8 @@
+## ThinkPHP-PanGu - 盘古ThinkPHP开源索引!
+面向 ThinkPHP 的开源工程索引：组件、框架、服务与发布工具，按能力组织，持续整理。
+仓库地址：**<https://github.com/indiboy-create/ThinkPHP-PanGu/>**
+在线站点：**<https://indiboy-create.github.io/ThinkPHP-PanGu/>**
+
 # think-richtext
 
 ThinkPHP 8 富文本入库转义与读取还原组件。使用 HTMLPurifier 严格白名单与 `htmlspecialchars`、`addslashes` 转义，对富文本写入数据库前进行过滤转义，读取后进行还原与二次过滤，防止数据库中出现可执行代码。

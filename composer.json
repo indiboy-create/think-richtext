@@ -1,5 +1,15 @@
 {
     "name": "youvision/think-richtext",
+    "authors": [
+        {
+            "name": "indiboy-create",
+            "homepage": "https://github.com/indiboy-create"
+        },
+        {
+            "name": "AI",
+            "role": "Developer"
+        }
+    ],
     "description": "ThinkPHP 8 富文本入库转义与读取还原组件，基于 HTMLPurifier 与 htmlspecialchars/addslashes 过滤可执行代码",
     "type": "library",
     "license": "MIT",
