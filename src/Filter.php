@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Youvision\ThinkRichText;
 
+use Youvision\ThinkRichText\Exception\RichTextException;
+use Youvision\ThinkRichText\Support\ConfigValidator;
+use Youvision\ThinkRichText\Support\Reporter;
+
 class Filter
 {
     protected array $config = [];
@@ -14,8 +18,14 @@ class Filter
 
     protected ?\HTMLPurifier $purifierInstance = null;
 
+    protected bool $purifierDisabledByConfig = false;
+
+    protected bool $purifierDegradationReported = false;
+
     public function __construct(array $config = [])
     {
+        ConfigValidator::validate($config);
+
         $this->config     = $config;
         $this->removeTags = array_map(
             static fn ($tag) => strtolower(trim((string) $tag)),
@@ -25,6 +35,8 @@ class Filter
 
     public function clean(string $html): string
     {
+        $this->assertInputLength($html);
+
         if (trim($html) === '') {
             return '';
         }
@@ -43,6 +55,7 @@ class Filter
                 $html = $this->restoreDataImages($html, $images);
             } catch (\Throwable $e) {
                 $html = $this->restoreDataImages($html, $images);
+                $this->degrade('HTMLPurifier 净化失败：' . $e->getMessage(), '内置过滤', true);
 
                 return class_exists(\DOMDocument::class)
                     ? $this->cleanWithDom($html)
@@ -52,7 +65,12 @@ class Filter
             return $html;
         }
 
+        if (!$this->purifierDisabledByConfig && !$this->purifierDegradationReported) {
+            $this->degrade('HTMLPurifier 不可用', '内置过滤', true);
+        }
+
         if (!class_exists(\DOMDocument::class)) {
+            $this->degrade('DOMDocument 扩展不可用', '正则兜底过滤', true);
             return $this->fallbackClean($html);
         }
 
@@ -70,13 +88,18 @@ class Filter
         $settings = (array) ($this->config['purifier'] ?? []);
         $enabled  = array_key_exists('enabled', $settings) ? (bool) $settings['enabled'] : true;
 
-        if (!$enabled || !class_exists(\HTMLPurifier::class) || !class_exists(\HTMLPurifier_Config::class)) {
+        if (!$enabled) {
+            $this->purifierDisabledByConfig = true;
+            return null;
+        }
+
+        if (!class_exists(\HTMLPurifier::class) || !class_exists(\HTMLPurifier_Config::class)) {
             return null;
         }
 
         try {
             $purifierConfig = \HTMLPurifier_Config::createDefault();
-            $purifierConfig->set('Core.Encoding', (string) ($this->config['charset'] ?? 'UTF-8'));
+            $purifierConfig->set('Core.Encoding', $this->configCharset());
 
             $doctype = (string) ($settings['doctype'] ?? 'HTML 4.01 Transitional');
             if ($doctype !== '') {
@@ -124,24 +147,68 @@ class Filter
                 $purifierConfig->set('URI.SafeIframeRegexp', $this->iframeRegexp($hosts));
             }
 
-            $cachePath = trim((string) ($settings['cache_path'] ?? ''));
-            if ($cachePath === '') {
-                $cachePath = sys_get_temp_dir() . '/think-richtext-htmlpurifier';
-            }
-
-            if (is_dir($cachePath) || @mkdir($cachePath, 0777, true) || is_dir($cachePath)) {
+            $cachePath = $this->cachePath($settings['cache_path'] ?? null);
+            if ($this->prepareCacheDirectory($cachePath)) {
                 $purifierConfig->set('Cache.DefinitionImpl', 'Serializer');
                 $purifierConfig->set('Cache.SerializerPath', $cachePath);
             } else {
+                $this->degrade(
+                    'HTMLPurifier 缓存目录不可用：' . $cachePath,
+                    '不使用定义缓存',
+                    false
+                );
                 $purifierConfig->set('Cache.DefinitionImpl', null);
             }
 
             $this->purifierInstance = new \HTMLPurifier($purifierConfig);
         } catch (\Throwable $e) {
+            $this->purifierDegradationReported = true;
+            $this->degrade('HTMLPurifier 初始化失败：' . $e->getMessage(), '内置过滤', true);
             $this->purifierInstance = null;
         }
 
         return $this->purifierInstance;
+    }
+
+    protected function cachePath(mixed $configured): string
+    {
+        $configured = trim((string) $configured);
+        if ($configured !== '') {
+            return rtrim($configured, '/\\');
+        }
+
+        if (Reporter::containerHas('app')) {
+            try {
+                $app = \think\Container::getInstance()->make('app');
+                if (is_object($app) && method_exists($app, 'getRuntimePath')) {
+                    $runtime = (string) $app->getRuntimePath();
+                    if ($runtime !== '') {
+                        return rtrim($runtime, '/\\') . DIRECTORY_SEPARATOR
+                            . 'think-richtext' . DIRECTORY_SEPARATOR . 'htmlpurifier';
+                    }
+                }
+            } catch (\Throwable $e) {
+                // 未在 ThinkPHP 环境中运行时使用项目本地目录
+            }
+        }
+
+        $base = getcwd() ?: dirname(__DIR__, 2);
+
+        return rtrim($base, '/\\') . DIRECTORY_SEPARATOR . 'runtime'
+            . DIRECTORY_SEPARATOR . 'think-richtext' . DIRECTORY_SEPARATOR . 'htmlpurifier';
+    }
+
+    protected function prepareCacheDirectory(string $path): bool
+    {
+        if ($path === '' || is_link($path)) {
+            return false;
+        }
+
+        if (!is_dir($path) && !@mkdir($path, 0750, true) && !is_dir($path)) {
+            return false;
+        }
+
+        return is_writable($path);
     }
 
     protected function protectDataImages(string $html, array &$map): string
@@ -153,16 +220,17 @@ class Filter
         }
 
         $counter = 0;
+        $token   = '__richtext_data_image_' . bin2hex(random_bytes(8)) . '_';
         $result  = preg_replace_callback(
             '#(<img\b[^>]*?\bsrc\s*=\s*)(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))#i',
-            function (array $matches) use (&$map, &$counter): string {
+            function (array $matches) use (&$map, &$counter, $token): string {
                 $value = $matches[2] ?? $matches[3] ?? $matches[4] ?? '';
 
                 if (!is_string($value) || !$this->isSafeDataImage($value)) {
                     return (string) $matches[0];
                 }
 
-                $placeholder = 'https://think-richtext.invalid/data-image-' . (++$counter) . '.png';
+                $placeholder = $token . (++$counter) . '__';
                 $map[$placeholder] = $value;
 
                 return $matches[1] . '"' . $placeholder . '"';
@@ -173,7 +241,7 @@ class Filter
             PREG_UNMATCHED_AS_NULL
         );
 
-        return $result ?? $html;
+        return $this->pregResult($result, $html, '保护 base64 图片');
     }
 
     protected function restoreDataImages(string $html, array $map): string
@@ -189,8 +257,16 @@ class Filter
             }
 
             $quoted = preg_quote($tag, '#');
-            $html   = preg_replace('#<' . $quoted . '\b[^>]*>[\s\S]*?</' . $quoted . '\s*>#i', '', $html) ?? $html;
-            $html   = preg_replace('#</?' . $quoted . '\b[^>]*>#i', '', $html) ?? $html;
+            $html   = $this->pregResult(
+                preg_replace('#<' . $quoted . '\b[^>]*>[\s\S]*?</' . $quoted . '\s*>#i', '', $html),
+                $html,
+                '移除标签内容'
+            );
+            $html   = $this->pregResult(
+                preg_replace('#</?' . $quoted . '\b[^>]*>#i', '', $html),
+                $html,
+                '移除标签'
+            );
         }
 
         return $html;
@@ -204,13 +280,26 @@ class Filter
 
         $result = preg_replace_callback(
             '#<iframe\b[^>]*>[\s\S]*?</iframe\s*>|<iframe\b[^>]*/?>#i',
-            static function (array $matches): string {
-                return preg_match('#\bsrc\s*=\s*(["\']?)\s*https?://#i', $matches[0]) ? $matches[0] : '';
+            function (array $matches): string {
+                $matched = preg_match('#\bsrc\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))#i', $matches[0], $src);
+
+                if ($matched === false) {
+                    $this->degrade('解析 iframe src 失败：' . preg_last_error_msg(), '移除 iframe', false);
+                    return '';
+                }
+
+                if ($matched !== 1) {
+                    return '';
+                }
+
+                $value = $src[1] ?? $src[2] ?? $src[3] ?? '';
+
+                return $this->isAllowedIframeUrl((string) $value) ? $matches[0] : '';
             },
             $html
         );
 
-        return $result ?? $html;
+        return $this->pregResult($result, $html, '清理 iframe');
     }
 
     protected function iframeRegexp(array $hosts): string
@@ -254,7 +343,7 @@ class Filter
 
         $result = preg_replace($patterns, '', $html);
 
-        return $result ?? '';
+        return $this->pregResult($result, $html, '移除服务端代码');
     }
 
     protected function cleanWithDom(string $html): string
@@ -396,14 +485,28 @@ class Filter
 
         $decoded = html_entity_decode($style, ENT_QUOTES | ENT_HTML5, 'UTF-8');
 
-        if (preg_match('/expression\s*\(|javascript\s*:|vbscript\s*:|behavior\s*:|-moz-binding|@import/i', $decoded)) {
+        $dangerous = preg_match('/expression\s*\(|javascript\s*:|vbscript\s*:|behavior\s*:|-moz-binding|@import/i', $decoded);
+
+        if ($dangerous === false) {
+            $this->degrade('检查内联样式失败：' . preg_last_error_msg(), '移除样式', false);
             return null;
         }
 
-        if (preg_match('/url\s*\(/i', $decoded)) {
+        if ($dangerous === 1) {
+            return null;
+        }
+
+        $hasUrl = preg_match('/url\s*\(/i', $decoded);
+
+        if ($hasUrl === false) {
+            $this->degrade('检查样式 url 失败：' . preg_last_error_msg(), '移除样式', false);
+            return null;
+        }
+
+        if ($hasUrl === 1) {
             $safe = true;
 
-            preg_replace_callback(
+            $checked = preg_replace_callback(
                 '/url\s*\(\s*([\'"]?)(.*?)\1\s*\)/is',
                 function (array $matches) use (&$safe): string {
                     if (!$this->isSafeUrl((string) $matches[2])) {
@@ -414,6 +517,11 @@ class Filter
                 },
                 $decoded
             );
+
+            if ($checked === null) {
+                $this->degrade('解析样式 url 失败：' . preg_last_error_msg(), '移除样式', false);
+                return null;
+            }
 
             if (!$safe) {
                 return null;
@@ -433,7 +541,13 @@ class Filter
             }
 
             $parts = preg_split('/\s+/', $item);
-            $url   = $parts[0] ?? '';
+
+            if ($parts === false) {
+                $this->degrade('解析 srcset 失败：' . preg_last_error_msg(), '移除 srcset', false);
+                return false;
+            }
+
+            $url = $parts[0] ?? '';
 
             if (!$this->isSafeUrlFor('img', 'src', $url)) {
                 return false;
@@ -466,10 +580,41 @@ class Filter
 
         $url = $this->normalizeUrl($url);
 
-        return (bool) preg_match(
-            '#^data:image/(?:png|jpe?g|gif|webp|bmp|avif);base64,[a-z0-9+/=\s]+$#i',
-            $url
+        $matched = preg_match(
+            '#^data:image/(?:png|jpe?g|gif|webp|bmp|avif);base64,([a-z0-9+/=\s]+)$#i',
+            $url,
+            $matches
         );
+
+        if ($matched !== 1) {
+            return false;
+        }
+
+        $payload = preg_replace('/\s+/', '', (string) $matches[1]);
+
+        if ($payload === null || $payload === '') {
+            return false;
+        }
+
+        $max = (int) ($this->config['max_data_image_bytes'] ?? 0);
+
+        if ($max > 0 && strlen($payload) > (int) ceil($max * 4 / 3) + 4) {
+            $this->degrade('base64 图片超过大小限制，已移除', '移除图片', false);
+            return false;
+        }
+
+        $binary = base64_decode($payload, true);
+
+        if ($binary === false || $binary === '') {
+            return false;
+        }
+
+        if ($max > 0 && strlen($binary) > $max) {
+            $this->degrade('base64 图片超过大小限制，已移除', '移除图片', false);
+            return false;
+        }
+
+        return true;
     }
 
     protected function isSafeUrl(string $url): bool
@@ -496,16 +641,27 @@ class Filter
         $url = html_entity_decode($url, ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $url = trim($url);
 
-        $cleaned = preg_replace('/[\x00-\x20\x7F]+/', '', $url);
-        $url     = $cleaned === null ? $url : $cleaned;
+        $url = $this->pregResult(
+            preg_replace('/[\x00-\x20\x7F]+/', '', $url),
+            $url,
+            '规范化 URL 控制字符'
+        );
 
-        $cleaned = preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u', '', $url);
-        $url     = $cleaned === null ? $url : $cleaned;
+        $url = $this->pregResult(
+            preg_replace('/[\x{200B}-\x{200D}\x{FEFF}]/u', '', $url),
+            $url,
+            '规范化 URL 零宽字符'
+        );
 
         return str_replace('\\', '/', $url);
     }
 
     protected function isAllowedIframe(\DOMElement $element): bool
+    {
+        return $this->isAllowedIframeUrl((string) $element->getAttribute('src'));
+    }
+
+    protected function isAllowedIframeUrl(string $src): bool
     {
         $hosts = (array) ($this->config['allowed_iframe_hosts'] ?? []);
 
@@ -513,7 +669,7 @@ class Filter
             return false;
         }
 
-        $src = $this->normalizeUrl((string) $element->getAttribute('src'));
+        $src = $this->normalizeUrl($src);
 
         if ($src === '' || !$this->isSafeUrl($src)) {
             return false;
@@ -596,23 +752,84 @@ class Filter
 
         if ($tags !== []) {
             $alt  = implode('|', $tags);
-            $html = preg_replace('#<(' . $alt . ')\b[^>]*>[\s\S]*?</\1\s*>#i', '', $html) ?? $html;
-            $html = preg_replace('#</?(?:' . $alt . ')\b[^>]*>#i', '', $html) ?? $html;
+            $html = $this->pregResult(
+                preg_replace('#<(' . $alt . ')\b[^>]*>[\s\S]*?</\1\s*>#i', '', $html),
+                $html,
+                '移除危险标签内容'
+            );
+            $html = $this->pregResult(
+                preg_replace('#</?(?:' . $alt . ')\b[^>]*>#i', '', $html),
+                $html,
+                '移除危险标签'
+            );
         }
 
-        $html = preg_replace(
-            '/\s+on[a-z]+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)/i',
-            '',
-            $html
-        ) ?? $html;
+        $html = $this->pregResult(
+            preg_replace('/\s+on[a-z]+\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]+)/i', '', $html),
+            $html,
+            '移除事件属性'
+        );
 
-        $html = preg_replace(
-            '/\s+(?:href|src|action|formaction|poster|background|cite|longdesc|dynsrc|lowsrc)\s*=\s*(?:"[^"]*(?:javascript|vbscript|data)\s*:[^"]*"|\'[^\']*(?:javascript|vbscript|data)\s*:[^\']*\'|[^\s>]*(?:javascript|vbscript|data)\s*:[^\s>]*)/i',
-            '',
-            $html
-        ) ?? $html;
+        $attributes = array_map(
+            static fn (string $attribute): string => preg_quote($attribute, '#'),
+            $this->urlAttributes()
+        );
+
+        $html = $this->pregResult(
+            preg_replace(
+                '#\s+(?:' . implode('|', $attributes) . ')\s*=\s*(?:"[^"]*(?:javascript|vbscript|data)\s*:[^"]*"|\'[^\']*(?:javascript|vbscript|data)\s*:[^\']*\'|[^\s>]*(?:javascript|vbscript|data)\s*:[^\s>]*)/i',
+                '',
+                $html
+            ),
+            $html,
+            '移除危险协议'
+        );
 
         return $html;
+    }
+
+    protected function configCharset(): string
+    {
+        $charset = strtoupper(trim((string) ($this->config['charset'] ?? 'UTF-8')));
+
+        return $charset === '' ? 'UTF-8' : $charset;
+    }
+
+    protected function assertInputLength(string $html): void
+    {
+        $max = (int) ($this->config['max_input_length'] ?? 0);
+
+        if ($max > 0 && strlen($html) > $max) {
+            throw new RichTextException(
+                sprintf('富文本内容超过最大长度限制：%d 字节（上限 %d 字节）', strlen($html), $max)
+            );
+        }
+    }
+
+    protected function degrade(string $reason, string $fallback, bool $throwInStrict): void
+    {
+        $message = $reason . '，已回退到' . $fallback;
+
+        if ($throwInStrict && $this->boolConfig('strict_mode', false)) {
+            throw new RichTextException($message);
+        }
+
+        Reporter::warning($message);
+    }
+
+    protected function pregResult(?string $result, string $fallback, string $context): string
+    {
+        if ($result !== null) {
+            return $result;
+        }
+
+        $this->degrade(
+            $context . '失败：' . preg_last_error_msg(),
+            '保留原内容',
+            false
+        );
+
+        return $fallback;
     }
 
     protected function boolConfig(string $name, bool $default): bool

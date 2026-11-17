@@ -5,14 +5,16 @@ use Youvision\ThinkRichText\RichText;
 if (!function_exists('richtext_instance')) {
     function richtext_instance(): RichText
     {
-        if (function_exists('app')) {
+        if (\Youvision\ThinkRichText\Support\Reporter::containerHas('richtext')) {
             try {
-                $instance = app('richtext');
+                $instance = \think\Container::getInstance()->make('richtext');
                 if ($instance instanceof RichText) {
                     return $instance;
                 }
             } catch (\Throwable $e) {
-                // 未注册服务时回退到独立实例
+                \Youvision\ThinkRichText\Support\Reporter::warning(
+                    '从容器获取 richtext 服务失败：' . $e->getMessage()
+                );
             }
         }
 
@@ -42,11 +44,12 @@ if (!function_exists('richtext_filter')) {
 }
 
 if (!function_exists('richtext_plain')) {
-    function richtext_plain($value, $length = null): string
+    function richtext_plain($value, $length = null, $alreadyDecoded = false): string
     {
         return richtext_instance()->plain(
             $value === null ? null : (string) $value,
-            $length === null ? null : (int) $length
+            $length === null ? null : (int) $length,
+            (bool) $alreadyDecoded
         );
     }
 }

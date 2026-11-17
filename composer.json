@@ -29,6 +29,18 @@
         "ext-mbstring": "*",
         "ezyang/htmlpurifier": "^4.17"
     },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6 || ^10.5 || ^11.5",
+        "topthink/framework": "^8.0"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Youvision\\ThinkRichText\\Tests\\": "tests/"
+        }
+    },
+    "suggest": {
+        "topthink/framework": "在 ThinkPHP 8 应用中自动注册 Service、Facade 与配置"
+    },
     "autoload": {
         "psr-4": {
             "Youvision\\ThinkRichText\\": "src/"
@@ -48,7 +60,12 @@
         }
     },
     "scripts": {
-        "test": "php tests/richtext_test.php"
+        "test": [
+            "php tests/richtext_test.php",
+            "phpunit"
+        ],
+        "test:legacy": "php tests/richtext_test.php",
+        "test:unit": "phpunit"
     },
     "config": {
         "sort-packages": true

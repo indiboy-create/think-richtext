@@ -5,18 +5,27 @@ declare(strict_types=1);
 namespace Youvision\ThinkRichText\Model\Concern;
 
 use Youvision\ThinkRichText\RichText;
+use Youvision\ThinkRichText\Support\Reporter;
 
 trait HasRichText
 {
+    protected ?array $richTextFieldsCache = null;
+
+    protected ?RichText $richTextInstance = null;
+
     /**
      * 模型可通过 protected $richTextFields = ['content', 'summary']; 指定字段。
      */
     public function richTextFields(): array
     {
+        if ($this->richTextFieldsCache !== null) {
+            return $this->richTextFieldsCache;
+        }
+
         $fields = property_exists($this, 'richTextFields') ? (array) $this->richTextFields : [];
         $global = (array) $this->richText()->getConfig('fields', []);
 
-        return array_values(array_unique(array_merge($global, $fields)));
+        return $this->richTextFieldsCache = array_values(array_unique(array_merge($global, $fields)));
     }
 
     protected function isRichTextField($name): bool
@@ -28,27 +37,33 @@ trait HasRichText
 
     protected function richText(): RichText
     {
-        if (function_exists('app')) {
-            try {
-                $instance = app('richtext');
-                if ($instance instanceof RichText) {
-                    return $instance;
-                }
-            } catch (\Throwable $e) {
-                // 未注册服务时回退到独立实例
-            }
+        if ($this->richTextInstance instanceof RichText) {
+            return $this->richTextInstance;
+        }
 
+        if (Reporter::containerHas('richtext')) {
             try {
-                $instance = app(RichText::class);
+                $instance = \think\Container::getInstance()->make('richtext');
                 if ($instance instanceof RichText) {
-                    return $instance;
+                    return $this->richTextInstance = $instance;
                 }
             } catch (\Throwable $e) {
-                // 未注册服务时回退到独立实例
+                Reporter::warning('从容器获取 richtext 服务失败：' . $e->getMessage());
             }
         }
 
-        return new RichText();
+        if (Reporter::containerHas(RichText::class)) {
+            try {
+                $instance = \think\Container::getInstance()->make(RichText::class);
+                if ($instance instanceof RichText) {
+                    return $this->richTextInstance = $instance;
+                }
+            } catch (\Throwable $e) {
+                Reporter::warning('从容器获取 RichText 实例失败：' . $e->getMessage());
+            }
+        }
+
+        return $this->richTextInstance = new RichText();
     }
 
     public function setAttr($name, $value, $data = [])

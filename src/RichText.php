@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Youvision\ThinkRichText;
 
+use Youvision\ThinkRichText\Exception\RichTextException;
+use Youvision\ThinkRichText\Support\ConfigValidator;
+use Youvision\ThinkRichText\Support\Reporter;
+
 class RichText
 {
     protected array $config = [];
@@ -15,15 +19,22 @@ class RichText
         $defaultFile = dirname(__DIR__) . '/config/richtext.php';
         $default     = is_file($defaultFile) ? (array) include $defaultFile : [];
 
-        if ($config === [] && class_exists(\think\facade\Config::class)) {
+        if ($config === [] && class_exists(\think\facade\Config::class) && Reporter::containerHas('config')) {
             try {
                 $config = (array) \think\facade\Config::get('richtext', []);
             } catch (\Throwable $e) {
                 $config = [];
+                Reporter::warning('读取 ThinkPHP 配置失败，使用包内默认配置：' . $e->getMessage());
             }
         }
 
-        $this->config     = array_merge($default, $config);
+        $this->config            = array_merge($default, $config);
+        $this->config['purifier'] = array_merge(
+            (array) ($default['purifier'] ?? []),
+            (array) ($this->config['purifier'] ?? [])
+        );
+
+        ConfigValidator::validate($this->config);
         $this->htmlFilter = new Filter($this->config);
     }
 
@@ -36,6 +47,8 @@ class RichText
         if ($value === null || $value === '') {
             return '';
         }
+
+        $this->assertInputLength($value);
 
         $value = $this->unescape($value);
 
@@ -63,6 +76,8 @@ class RichText
         if ($value === null || $value === '') {
             return '';
         }
+
+        $this->assertInputLength($value);
 
         if ($this->boolConfig('auto_slashes', false)) {
             $level = strtolower((string) $this->config['slash_mode']) === 'double' ? 2 : 1;
@@ -145,15 +160,18 @@ class RichText
      */
     public function filter(?string $value): string
     {
-        return $this->htmlFilter->clean((string) $value);
+        $value = (string) $value;
+        $this->assertInputLength($value);
+
+        return $this->htmlFilter->clean($value);
     }
 
     /**
      * 提取纯文本摘要，对应 SubSmalltextVal。
      */
-    public function plain(?string $html, ?int $length = null): string
+    public function plain(?string $html, ?int $length = null, bool $alreadyDecoded = false): string
     {
-        $html = $this->decode($html);
+        $html = $alreadyDecoded ? (string) $html : $this->decode($html);
         $html = str_replace(
             ["\r\n", '<br />', '<br>', '<br/>', '&nbsp;', "\xC2\xA0"],
             ['', "\r\n", "\r\n", "\r\n", ' ', ' '],
@@ -175,9 +193,9 @@ class RichText
         return $text;
     }
 
-    public function summary(?string $html, ?int $length = null): string
+    public function summary(?string $html, ?int $length = null, bool $alreadyDecoded = false): string
     {
-        return $this->plain($html, $length);
+        return $this->plain($html, $length, $alreadyDecoded);
     }
 
     /**
@@ -227,14 +245,14 @@ class RichText
         $configFile = dirname(__DIR__) . '/config/richtext.php';
         $config     = is_file($configFile) ? (array) include $configFile : [];
 
-        if (class_exists(\think\facade\Config::class)) {
+        if (class_exists(\think\facade\Config::class) && Reporter::containerHas('config')) {
             try {
                 $current = \think\facade\Config::get('richtext');
                 if (is_array($current)) {
                     $config = array_merge($config, $current);
                 }
             } catch (\Throwable $e) {
-                // 未初始化 ThinkPHP 时使用默认配置
+                Reporter::warning('读取 ThinkPHP 配置失败，使用包内默认配置：' . $e->getMessage());
             }
         }
 
@@ -289,6 +307,17 @@ class RichText
         $charset = (string) ($this->config['charset'] ?? 'UTF-8');
 
         return $charset === '' ? 'UTF-8' : $charset;
+    }
+
+    protected function assertInputLength(string $value): void
+    {
+        $max = (int) ($this->config['max_input_length'] ?? 0);
+
+        if ($max > 0 && strlen($value) > $max) {
+            throw new RichTextException(
+                sprintf('富文本内容超过最大长度限制：%d 字节（上限 %d 字节）', strlen($value), $max)
+            );
+        }
     }
 
     protected function boolConfig(string $name, bool $default): bool
